@@ -1,0 +1,90 @@
+name: Verify Plurimath integration
+
+on:
+  push:
+    branches: [ci/plurimath-leptris-validation]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cbd9daebea257b63388dcca6789d8776550ec43b
+          path: binding
+      - uses: actions/checkout@v4
+        with:
+          repository: leptris/leptris
+          ref: 094b2c4799becc8648b259d3c588754cef6a7a17
+          path: engine
+      - uses: actions/checkout@v5
+        with:
+          repository: plurimath/plurimath-ts
+          ref: feat/leptris-xml-probe
+          submodules: true
+          path: plurimath
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.74
+      - name: Build the reviewed binding
+        working-directory: binding
+        env:
+          ENGINESRC: ${{ github.workspace }}/engine/src
+        run: |
+          set -euo pipefail
+          ./build.sh 2>&1 | tee build.log
+          if grep -q "warning:" build.log; then
+            echo "::error::WASM compilation emitted warnings"
+            exit 1
+          fi
+      - name: Run the full binding tests
+        working-directory: binding
+        run: npm test
+      - name: Install and build Plurimath
+        working-directory: plurimath
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Compare source, ESM and CommonJS parsers
+        working-directory: plurimath
+        run: |
+          node scripts/probe-leptris.mjs "$GITHUB_WORKSPACE/binding/src/index.js" > leptris-source.json
+          node scripts/probe-leptris.mjs "$GITHUB_WORKSPACE/binding/src/index.js" --built > leptris-esm.json
+          node scripts/probe-leptris.mjs "$GITHUB_WORKSPACE/binding/src/index.js" --built-cjs > leptris-cjs.json
+      - name: Record source commits
+        if: always()
+        run: |
+          git -C binding rev-parse HEAD > binding-commit.txt
+          git -C engine rev-parse HEAD > engine-commit.txt
+          git -C plurimath rev-parse HEAD > plurimath-commit.txt
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib
+          files = [p for root in (Path("binding/src"), Path("binding/dist")) for p in root.rglob("*") if p.is_file()]
+          files += [Path("binding/package.json"), *Path(".").glob("*-commit.txt")]
+          Path("SHA256SUMS").write_text("".join(hashlib.sha256(p.read_bytes()).hexdigest() + "  " + p.as_posix() + "\n" for p in sorted(files)))
+          PYCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: leptris-plurimath-verification
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            binding/src/
+            binding/dist/
+            binding/package.json
+            binding/build.log
+            plurimath/leptris-*.json
+            *-commit.txt
+            SHA256SUMS
